@@ -1,13 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.io import loadmat
+from numpy.fft import fft2, fftshift
+from scipy.ndimage import median_filter, gaussian_filter
+from scipy.signal import convolve2d
 from skimage.io import imread
 from skimage.util import img_as_float
 from skimage.color import rgb2gray
-from scipy.io import loadmat
-from scipy.signal import convolve2d, medfilt2d
-from scipy.ndimage import gaussian_filter
-from skimage.util import random_noise
-from numpy.fft import fft2, fftshift
+from skimage import exposure
+from skimage.filters import sobel
 
 plt.close('all')
 
@@ -19,7 +20,7 @@ plt.close('all')
 mat = loadmat('data/hrana.mat')
 img = mat.get('a')
 
-profile = ...
+profile = img[1, :]
 
 plt.figure()
 plt.subplot(1, 2, 1)
@@ -31,11 +32,11 @@ plt.title('Jasovy profil')
 plt.show()
 
 first_h = np.array([[0, 0, 0], [0, 1, -1], [0, 0, 0]])
-filtered_by_1st = ...
+filtered_by_1st = convolve2d(img, first_h, mode='valid')
 profile_1st = filtered_by_1st[50, :]
 
 second_h = np.array([[0, 0, 0], [1, -2, 1], [0, 0, 0]])
-filtered_by_2nd = ...
+filtered_by_2nd = convolve2d(img, second_h, mode='valid')
 profile_2nd = filtered_by_2nd[50, :]
 
 plt.figure()
@@ -71,6 +72,11 @@ plt.show()
 # =============================================================================
 img = rgb2gray(img_as_float(imread('data/MRI_brain.jpg')))
 
+mat = loadmat('data/hrana.mat')
+key = [k for k in mat if not k.startswith('__')][0]
+img_edge = np.asarray(mat[key], dtype=float)
+
+
 def GetProfileWidth(edge_profile):
     max_intensity = np.max(edge_profile)
     bottom = max_intensity * 0.1
@@ -81,18 +87,26 @@ def GetProfileWidth(edge_profile):
     return (profile_width)
 
 
-K = 0.2
-F = np.zeros((3, 3))
-F[1, 1] = K
-
 L = np.ones((3, 3))
 L[1, 1] = -8
 
-sharpening_operator = (F + (-L)) / K
-sharpened_by_2nd = ...
+
+def make_sharpening_operator(K):
+    F = np.zeros((3, 3))
+    F[1, 1] = K
+    return (F + (-L)) / K  # = delta - L/K  ->  alfa = 1/K
+
+
+K = 0.2
+sharpening_operator = make_sharpening_operator(K)
+sharpened_by_2nd = convolve2d(img_edge, sharpening_operator, mode='same', boundary='symm')
+
+# Jasový profil = jeden řádek přes hranu (pro vodorovnou hranu použijte sloupec [:, col])
+row = img_edge.shape[0] // 2
+profile = img_edge[row, :]
 
 # Overte funkcnost filtrace jak zobrazenim vyfiltrovanych obrazu a odpovidajicich jasovych profilu, tak vypoctenim a porovnanim sirek profilu hran
-profile_sharpened_2nd = ...
+profile_sharpened_2nd = sharpened_by_2nd[row, :]
 width_2nd = GetProfileWidth(profile_sharpened_2nd)
 width_orig = GetProfileWidth(profile)
 
@@ -100,7 +114,7 @@ print(['Sirka originalu:', width_orig, 'Sirka po filtraci s vyuzitim druhe deriv
 
 plt.figure()
 plt.subplot(2, 2, 1)
-plt.imshow(img, cmap='gray')
+plt.imshow(img_edge, cmap='gray')
 plt.title('Originalni obraz')
 plt.subplot(2, 2, 3)
 plt.plot(profile)
@@ -114,11 +128,22 @@ plt.plot(profile_sharpened_2nd)
 plt.title('Jasovy profil zostreneho obrazu')
 plt.show()
 
+# Mente parametr K a pozorujte sirku hrany
+for K_ in [0.1, 0.2, 0.5, 1.0, 2.0]:
+    op = make_sharpening_operator(K_)
+    res = convolve2d(img_edge, op, mode='same', boundary='symm')
+    print(f'K = {K_}: alfa = {1 / K_:.1f}, sirka hrany = {GetProfileWidth(res[row, :])}')
+
+# --- Část 2: MRI + Laplaceův operátor ------------------------------------------
+img = rgb2gray(img_as_float(imread('data/MRI_brain.jpg')))
+
 L = np.ones((3, 3))
 L[1, 1] = -8
-laplacian = ...
+laplacian = convolve2d(img, L, mode='same', boundary='symm')
 
-sharpened_img = ...
+# Střed Laplaceova jádra je záporný -> Laplacian se ODČÍTÁ
+alpha = 0.5
+sharpened_img = np.clip(img - alpha * laplacian, 0, 1)
 
 plt.figure()
 plt.subplot(1, 3, 1)
@@ -144,4 +169,93 @@ plt.show()
 # Načtěte obraz ‘ugly_quidditch.jpg’
 img = img_as_float(imread('data/ugly_quidditch.png'))
 
+def amplitude_spectrum(x):
+    return np.log(1 + fftshift(np.abs(fft2(x))))
+
+
+def show_with_analysis(x, title, fig_num):
+    """Obraz + histogram + amplitudové spektrum."""
+    plt.figure(fig_num, figsize=(15, 4))
+    plt.subplot(1, 3, 1)
+    plt.imshow(x, cmap='gray', vmin=0, vmax=1)
+    plt.title(title)
+    plt.subplot(1, 3, 2)
+    plt.hist(x.ravel(), bins=256, range=(0, 1), color='k')
+    plt.title('Histogram')
+    plt.xlabel('Jasova hodnota')
+    plt.ylabel('Cetnost')
+    plt.subplot(1, 3, 3)
+    M, N = x.shape
+    plt.imshow(amplitude_spectrum(x), cmap='gray', extent=[-N / 2, N / 2, M / 2, -M / 2])
+    plt.title('Amplitudove spektrum')
+    plt.xlabel('Prostorova frekvence [1/m]')
+    plt.ylabel('Prostorova frekvence [1/m]')
+    plt.tight_layout()
+
+
+# Zobrazte si obraz spolu s jeho histogramem a spektrem
+show_with_analysis(img, 'Puvodni obraz', 'Ukol 3 - analyza')
+plt.show()
+
+# -----------------------------------------------------------------------------
+# Aplikujte na obraz vhodnou filtraci na odstranění přítomného šumu
+# Volba podle toho, co je vidět v obraze / histogramu / spektru:
+#   'median'   - impulsní šum (sůl a pepř): v histogramu špičky na 0 a 1
+#   'gaussian' - gaussovský/bílý šum: ve spektru plochá vysokofrekvenční "podlaha"
+# -----------------------------------------------------------------------------
+noise_filter = 'median'
+
+if noise_filter == 'median':
+    denoised = median_filter(img, size=3)
+else:
+    denoised = gaussian_filter(img, sigma=1.0)
+
+# -----------------------------------------------------------------------------
+# Na vyfiltrovaný obraz použijte vhodnou transformaci kontrastu
+#   'stretch'  - lineární roztažení histogramu (úzký histogram)
+#   'equalize' - vyrovnání histogramu (nerovnoměrné rozložení jasů)
+#   'gamma'    - gama korekce (celkově příliš tmavý / světlý obraz)
+# -----------------------------------------------------------------------------
+contrast = 'stretch'
+
+if contrast == 'stretch':
+    p_low, p_high = np.percentile(denoised, (2, 98))
+    contrasted = exposure.rescale_intensity(denoised, in_range=(p_low, p_high), out_range=(0, 1))
+elif contrast == 'equalize':
+    contrasted = exposure.equalize_hist(denoised)
+else:
+    contrasted = exposure.adjust_gamma(denoised, gamma=0.6)  # gamma < 1 zesvětlí, > 1 ztmaví
+
+# -----------------------------------------------------------------------------
+# Na vyfiltrovaný obraz po transformaci kontrastu použijte vhodný operátor
+# a zvýrazněte hrany v obraze
+# -----------------------------------------------------------------------------
+L = np.ones((3, 3))
+L[1, 1] = -8
+laplacian = convolve2d(contrasted, L, mode='same', boundary='symm')
+alpha = 0.5
+sharpened = np.clip(contrasted - alpha * laplacian, 0, 1)  # střed jádra záporný -> odečítáme
+
+edges = sobel(contrasted)  # velikost gradientu (samotné hrany)
+
+show_with_analysis(denoised, 'Po odstraneni sumu', 'Ukol 3 - po filtraci')
+show_with_analysis(contrasted, 'Po transformaci kontrastu', 'Ukol 3 - po kontrastu')
+
+plt.figure('Ukol 3 - vysledek', figsize=(16, 4.5))
+plt.subplot(1, 4, 1)
+plt.imshow(img, cmap='gray', vmin=0, vmax=1)
+plt.title('Puvodni')
+plt.subplot(1, 4, 2)
+plt.imshow(denoised, cmap='gray', vmin=0, vmax=1)
+plt.title(f'Bez sumu ({noise_filter})')
+plt.subplot(1, 4, 3)
+plt.imshow(sharpened, cmap='gray', vmin=0, vmax=1)
+plt.title(f'Kontrast ({contrast}) + zostreni hran')
+plt.subplot(1, 4, 4)
+plt.imshow(edges, cmap='gray')
+plt.title('Hrany (Sobel)')
+for a in plt.gcf().axes:
+    a.axis('off')
+plt.tight_layout()
+plt.show()
 
